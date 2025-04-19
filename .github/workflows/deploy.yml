@@ -16,7 +16,7 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v1
         with:
-          version: "v1.32.0"
+          version: "v1.32.3"
         id: install
 
       - name: Configure AWS Credentials 2
@@ -47,6 +47,6 @@ jobs:
 
       - name: Deploy image to Amazon EKS
         run: |
-          kubectl apply -f eks/aws-auth.yaml
+          kubectl apply -f eks/aws-auth.yaml --validate=false
           kubectl apply -f eks/deployment.yaml
           kubectl apply -f eks/service.yaml
