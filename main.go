@@ -8,7 +8,13 @@ import (
 	"net/http"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/rakyll/statik/fs"
 
+	_ "github.com/quocbaodoan/simplebank/docs/statik"
+
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/lib/pq"
 	"github.com/quocbaodoan/simplebank/api"
 	db "github.com/quocbaodoan/simplebank/db/sqlc"
@@ -31,9 +37,28 @@ func main() {
 		log.Fatal("cannot connect to db:", err)
 	}
 
+	runDBMigration(config.MigrationURL, config.DBSource)
+
 	store := db.NewStore(conn)
 	go runGatewayServer(config, store)
 	runGrpcServer(config, store)
+}
+
+func runDBMigration(migrationURL string, dbSource string) {
+	migration, err := migrate.New(migrationURL, dbSource)
+	if err != nil {
+		log.Fatal("cannot create migration:", err)
+	}
+
+	if err = migration.Up(); err != nil {
+		if err == migrate.ErrNoChange {
+			log.Println("no migration to run")
+			return
+		}
+		log.Fatal("failed to run migration:", err)
+	}
+
+	log.Println("db migrated successfully")
 }
 
 func runGrpcServer(config util.Config, store db.Store) {
@@ -86,8 +111,13 @@ func runGatewayServer(config util.Config, store db.Store) {
 	mux := http.NewServeMux()
 	mux.Handle("/", grpcMux)
 
-	fs := http.FileServer(http.Dir("./docs/swagger"))
-	mux.Handle("/swagger/", http.StripPrefix("/swagger/", fs))
+	statikFS, err := fs.New()
+	if err != nil {
+		log.Fatal("cannot create statik fs:", err)
+	}
+
+	swaggerHandler := http.StripPrefix("/swagger/", http.FileServer(statikFS))
+	mux.Handle("/swagger/", swaggerHandler)
 
 	listener, err := net.Listen("tcp", config.HTTPServerAddress)
 	if err != nil {
