@@ -1,12 +1,9 @@
 package gapi
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"io"
 	"reflect"
 	"testing"
 
@@ -40,13 +37,11 @@ func (expected eqCreateUserTxParamsMatcher) Matches(x interface{}) bool {
 	}
 
 	expected.arg.HashedPassword = actualArg.HashedPassword
-
 	if !reflect.DeepEqual(expected.arg.CreateUserParams, actualArg.CreateUserParams) {
 		return false
 	}
 
 	err = actualArg.AfterCreate(expected.user)
-
 	return err == nil
 }
 
@@ -56,6 +51,20 @@ func (e eqCreateUserTxParamsMatcher) String() string {
 
 func EqCreateUserTxParams(arg db.CreateUserTxParams, password string, user db.User) gomock.Matcher {
 	return eqCreateUserTxParamsMatcher{arg, password, user}
+}
+
+func randomUser(t *testing.T) (user db.User, password string) {
+	password = util.RandomString(6)
+	hashedPassword, err := util.HashPassword(password)
+	require.NoError(t, err)
+
+	user = db.User{
+		Username:       util.RandomOwner(),
+		HashedPassword: hashedPassword,
+		FullName:       util.RandomOwner(),
+		Email:          util.RandomEmail(),
+	}
+	return
 }
 
 func TestCreateUserAPI(t *testing.T) {
@@ -91,7 +100,8 @@ func TestCreateUserAPI(t *testing.T) {
 				taskPayload := &worker.PayloadSendVerifyEmail{
 					Username: user.Username,
 				}
-				taskDistributor.EXPECT().DistributeTaskSendVerifyEmail(gomock.Any(), taskPayload, gomock.Any()).
+				taskDistributor.EXPECT().
+					DistributeTaskSendVerifyEmail(gomock.Any(), taskPayload, gomock.Any()).
 					Times(1).
 					Return(nil)
 			},
@@ -118,15 +128,64 @@ func TestCreateUserAPI(t *testing.T) {
 					Times(1).
 					Return(db.CreateUserTxResult{}, sql.ErrConnDone)
 
-				taskDistributor.EXPECT().DistributeTaskSendVerifyEmail(gomock.Any(), gomock.Any(), gomock.Any()).
-					Times(0).
-					Return(nil)
+				taskDistributor.EXPECT().
+					DistributeTaskSendVerifyEmail(gomock.Any(), gomock.Any(), gomock.Any()).
+					Times(0)
 			},
 			checkResponse: func(t *testing.T, res *pb.CreateUserResponse, err error) {
 				require.Error(t, err)
 				st, ok := status.FromError(err)
 				require.True(t, ok)
 				require.Equal(t, codes.Internal, st.Code())
+			},
+		},
+		{
+			name: "DuplicateUsername",
+			req: &pb.CreateUserRequest{
+				Username: user.Username,
+				Password: password,
+				FullName: user.FullName,
+				Email:    user.Email,
+			},
+			buildStubs: func(store *mockdb.MockStore, taskDistributor *mockwk.MockTaskDistributor) {
+				store.EXPECT().
+					CreateUserTx(gomock.Any(), gomock.Any()).
+					Times(1).
+					Return(db.CreateUserTxResult{}, db.ErrUniqueViolation)
+
+				taskDistributor.EXPECT().
+					DistributeTaskSendVerifyEmail(gomock.Any(), gomock.Any(), gomock.Any()).
+					Times(0)
+			},
+			checkResponse: func(t *testing.T, res *pb.CreateUserResponse, err error) {
+				require.Error(t, err)
+				st, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.AlreadyExists, st.Code())
+			},
+		},
+		{
+			name: "InvalidEmail",
+			req: &pb.CreateUserRequest{
+				Username: user.Username,
+				Password: password,
+				FullName: user.FullName,
+				Email:    "invalid-email",
+			},
+			buildStubs: func(store *mockdb.MockStore, taskDistributor *mockwk.MockTaskDistributor) {
+				store.EXPECT().
+					CreateUserTx(gomock.Any(), gomock.Any()).
+					Times(0)
+
+				taskDistributor.EXPECT().
+					DistributeTaskSendVerifyEmail(gomock.Any(), gomock.Any(), gomock.Any()).
+					Times(0)
+			},
+			checkResponse: func(t *testing.T, res *pb.CreateUserResponse, err error) {
+				require.Error(t, err)
+				st, ok := status.FromError(err)
+				require.True(t, ok)
+				require.Equal(t, codes.InvalidArgument, st.Code())
 			},
 		},
 	}
@@ -144,159 +203,10 @@ func TestCreateUserAPI(t *testing.T) {
 			taskDistributor := mockwk.NewMockTaskDistributor(taskCtrl)
 
 			tc.buildStubs(store, taskDistributor)
-
 			server := newTestServer(t, store, taskDistributor)
-			res, err := server.CreateUser(context.Background(), tc.req)
 
+			res, err := server.CreateUser(context.Background(), tc.req)
 			tc.checkResponse(t, res, err)
 		})
 	}
-}
-
-// func TestLoginUserAPI(t *testing.T) {
-// 	user, password := randomUser(t)
-
-// 	testCases := []struct {
-// 		name          string
-// 		body          gin.H
-// 		buildStubs    func(store *mockdb.MockStore)
-// 		checkResponse func(recoder *httptest.ResponseRecorder)
-// 	}{
-// 		{
-// 			name: "OK",
-// 			body: gin.H{
-// 				"username": user.Username,
-// 				"password": password,
-// 			},
-// 			buildStubs: func(store *mockdb.MockStore) {
-// 				store.EXPECT().
-// 					GetUser(gomock.Any(), gomock.Eq(user.Username)).
-// 					Times(1).
-// 					Return(user, nil)
-// 				store.EXPECT().
-// 					CreateSession(gomock.Any(), gomock.Any()).
-// 					Times(1)
-// 			},
-// 			checkResponse: func(recorder *httptest.ResponseRecorder) {
-// 				require.Equal(t, http.StatusOK, recorder.Code)
-// 			},
-// 		},
-// 		{
-// 			name: "UserNotFound",
-// 			body: gin.H{
-// 				"username": "NotFound",
-// 				"password": password,
-// 			},
-// 			buildStubs: func(store *mockdb.MockStore) {
-// 				store.EXPECT().
-// 					GetUser(gomock.Any(), gomock.Any()).
-// 					Times(1).
-// 					Return(db.User{}, db.ErrRecordNotFound)
-// 			},
-// 			checkResponse: func(recorder *httptest.ResponseRecorder) {
-// 				require.Equal(t, http.StatusNotFound, recorder.Code)
-// 			},
-// 		},
-// 		{
-// 			name: "IncorrectPassword",
-// 			body: gin.H{
-// 				"username": user.Username,
-// 				"password": "incorrect",
-// 			},
-// 			buildStubs: func(store *mockdb.MockStore) {
-// 				store.EXPECT().
-// 					GetUser(gomock.Any(), gomock.Eq(user.Username)).
-// 					Times(1).
-// 					Return(user, nil)
-// 			},
-// 			checkResponse: func(recorder *httptest.ResponseRecorder) {
-// 				require.Equal(t, http.StatusUnauthorized, recorder.Code)
-// 			},
-// 		},
-// 		{
-// 			name: "InternalError",
-// 			body: gin.H{
-// 				"username": user.Username,
-// 				"password": password,
-// 			},
-// 			buildStubs: func(store *mockdb.MockStore) {
-// 				store.EXPECT().
-// 					GetUser(gomock.Any(), gomock.Any()).
-// 					Times(1).
-// 					Return(db.User{}, sql.ErrConnDone)
-// 			},
-// 			checkResponse: func(recorder *httptest.ResponseRecorder) {
-// 				require.Equal(t, http.StatusInternalServerError, recorder.Code)
-// 			},
-// 		},
-// 		{
-// 			name: "InvalidUsername",
-// 			body: gin.H{
-// 				"username": "invalid-user#1",
-// 				"password": password,
-// 			},
-// 			buildStubs: func(store *mockdb.MockStore) {
-// 				store.EXPECT().
-// 					GetUser(gomock.Any(), gomock.Any()).
-// 					Times(0)
-// 			},
-// 			checkResponse: func(recorder *httptest.ResponseRecorder) {
-// 				require.Equal(t, http.StatusBadRequest, recorder.Code)
-// 			},
-// 		},
-// 	}
-
-// 	for i := range testCases {
-// 		tc := testCases[i]
-
-// 		t.Run(tc.name, func(t *testing.T) {
-// 			ctrl := gomock.NewController(t)
-// 			defer ctrl.Finish()
-
-// 			store := mockdb.NewMockStore(ctrl)
-// 			tc.buildStubs(store)
-
-// 			server := newTestServer(t, store)
-// 			recorder := httptest.NewRecorder()
-
-// 			// Marshal body data to JSON
-// 			data, err := json.Marshal(tc.body)
-// 			require.NoError(t, err)
-
-// 			url := "/users/login"
-// 			request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
-// 			require.NoError(t, err)
-
-// 			server.router.ServeHTTP(recorder, request)
-// 			tc.checkResponse(recorder)
-// 		})
-// 	}
-// }
-
-func randomUser(t *testing.T) (user db.User, password string) {
-	password = util.RandomString(6)
-	hashedPassword, err := util.HashPassword(password)
-	require.NoError(t, err)
-
-	user = db.User{
-		Username:       util.RandomOwner(),
-		HashedPassword: hashedPassword,
-		FullName:       util.RandomOwner(),
-		Email:          util.RandomEmail(),
-	}
-	return
-}
-
-func requireBodyMatchUser(t *testing.T, body *bytes.Buffer, user db.User) {
-	data, err := io.ReadAll(body)
-	require.NoError(t, err)
-
-	var gotUser db.User
-	err = json.Unmarshal(data, &gotUser)
-
-	require.NoError(t, err)
-	require.Equal(t, user.Username, gotUser.Username)
-	require.Equal(t, user.FullName, gotUser.FullName)
-	require.Equal(t, user.Email, gotUser.Email)
-	require.Empty(t, gotUser.HashedPassword)
 }
