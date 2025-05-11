@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	authrizationHeader  = "authorization"
+	authorizationHeader = "authorization"
 	authorizationBearer = "bearer"
 )
 
@@ -20,7 +20,7 @@ func (server *Server) authorizeUser(ctx context.Context) (*token.Payload, error)
 		return nil, fmt.Errorf("missing metadata")
 	}
 
-	values := md.Get(authrizationHeader)
+	values := md.Get(authorizationHeader)
 	if len(values) == 0 {
 		return nil, fmt.Errorf("missing authorization header")
 	}

@@ -59,3 +59,15 @@ func ValidateFullname(value string) error {
 
 	return nil
 }
+
+func ValidateEmailId(value int64) error {
+	if value <= 0 {
+		return fmt.Errorf("invalid email id")
+	}
+
+	return nil
+}
+
+func ValidateSecretCode(value string) error {
+	return ValidateString(value, 32, 120)
+}
